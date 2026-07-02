@@ -1,12 +1,12 @@
 import streamlit as st
+import requests
 import json
 import math
 import re
 import os
 from collections import Counter
-from groq import Groq  # Swapped from requests to use the cloud endpoint client
 
-# TF-IDF Simple RAG Search Engine - KEPT UNCHANGED
+# TF-IDF Simple RAG Search Engine
 def tokenize(text):
     return re.findall(r'\w+', text.lower())
 
@@ -39,9 +39,11 @@ class SimpleSearch:
 
 @st.cache_resource
 def load_search_index():
-    # RELATIVE PATH ADJUSTMENT: Safely look right next to app.py in GitHub
     dataset_path = "nityacare_culture_dataset.jsonl"
+    
+    # Check if the file exists in the current working directory
     if not os.path.exists(dataset_path):
+        # Fallback to the exact directory where app.py is hosted
         project_dir = os.path.dirname(os.path.abspath(__file__))
         dataset_path = os.path.join(project_dir, dataset_path)
     
@@ -55,12 +57,6 @@ def load_search_index():
                     except Exception:
                         pass
     return SimpleSearch(documents)
-
-# Cloud Key Initialization (Will read securely from Advanced Settings > Secrets)
-try:
-    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-except Exception as e:
-    st.error("API Key missing. Please add GROQ_API_KEY to Streamlit Secrets.")
 
 st.set_page_config(page_title="NityaCare Culture Coach", page_icon="🛡️")
 st.title("🛡️ NityaCare Culture Coach")
@@ -82,16 +78,16 @@ if user_input := st.chat_input("Describe a workplace conflict or scenario..."):
         response_placeholder = st.empty()
         full_response = ""
         
-        # RAG - Search for matching examples - KEPT UNCHANGED
+        # RAG - Search for matching examples
         search_index = load_search_index()
         matches = search_index.search(user_input, top_k=2)
         
-        # Build prompt incorporating retrieved context - KEPT UNCHANGED
+        # Build prompt incorporating retrieved context
         examples_text = ""
         for idx, match in enumerate(matches):
             examples_text += f"EXAMPLE {idx + 1}:\n### Workplace Situation:\n{match['instruction']}\n\n### Culture Coach Response:\n{match['output']}\n\n"
             
-        # Formulate adaptive prompt - KEPT UNCHANGED
+        # Formulate an adaptive prompt that tells the model to scale its response based on the input
         formatted_prompt = (
             f"<start_of_turn>user\n"
             f"You are the NityaCare Culture Coach. Analyze the workplace situation and provide clear guidance based on the Team Culture Charter using 'Our Way' vs 'Not Our Way' parameters.\n"
@@ -109,28 +105,30 @@ if user_input := st.chat_input("Describe a workplace conflict or scenario..."):
             f"<start_of_turn>model\n"
         )
         
-        # CLOUD REPLACEMENT FOR THE OLLAMA REQUEST BLOCK
-        # Calls the ultra-fast, cloud-hosted version of Gemma 2 (9B parameter IT model) completely for free
-        try:
-            stream = client.chat.completions.create(
-                model="gemma2-9b-it",
-                messages=[{"role": "user", "content": formatted_prompt}],
-                temperature=0.2,
-                stop=["<end_of_turn>", "### Workplace Situation:", "### Culture Coach Response:"],
-                stream=True,
-            )
-            
-            for chunk in stream:
-                text_chunk = chunk.choices[0].delta.content or ""
+        url = "http://localhost:11434/api/generate"
+        payload = {
+            "model": "gemma2:2b", # 1. Pivoted away from the corrupted file to the pure base model
+            "prompt": formatted_prompt, 
+            "stream": True,
+            "options": {
+                "temperature": 0.2, # 2. Lowered temperature slightly to keep answers factual and grounded
+                "stop": ["<end_of_turn>", "### Workplace Situation:", "### Culture Coach Response:"]
+            }
+        }
+        
+        response = requests.post(url, json=payload, stream=True)
+        
+        for line in response.iter_lines():
+            if line:
+                chunk = json.loads(line.decode("utf-8"))
+                text_chunk = chunk.get("response", "")
                 
-                # Double-check guardrail to cut off text string loop immediately - KEPT UNCHANGED
+                # Double-check guardrail to cut off text string loop immediately
                 if "### Workplace" in text_chunk or "### Culture" in text_chunk:
                     break
                     
                 full_response += text_chunk
                 response_placeholder.markdown(full_response + "▌")
-        except Exception as e:
-            st.error(f"Error querying Cloud API: {e}")
                 
         response_placeholder.markdown(full_response)
         st.session_state.messages.append({"role": "assistant", "content": full_response})
